@@ -1,0 +1,21 @@
+{
+  "crop_size":[256, 256],
+  "crop_size": false,
+
+  "rgb_max": 255.0 ,
+  "loss": "L1Loss",
+
+  "number_workers": 4,
+  "number_gpus": 1,
+  "no_cuda": false,
+  "fp16": false,
+
+  "seed": 1,
+  "save": "./save_flow",
+  "dir_checkpoints": "./checkpoints",
+
+  "inference_size": [-1, -1],
+  "inference_n_batches": 1,
+  "warping_n_batches": 1
+
+}
