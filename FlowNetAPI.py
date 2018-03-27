@@ -34,13 +34,11 @@ class FlowNet2API(object):
     def __init__(self, name_model="FlowNet2"):
 
         self.name_model = name_model
-
         self.get_config()
         self.load_model()
 
-
-
     def flow_estimate(self, img0, img1, save_flow=True, flow_visualize=False, is_cropped =False, inference_batch_size = 1):
+        self.mode = 'flow_estimation'
 
         self.args.save_flow = save_flow
         self.flow_visualize = flow_visualize
@@ -51,58 +49,30 @@ class FlowNet2API(object):
         self.inference(data, self.model_and_loss, offset=1)
 
 
-    def flow_warping(self,img0, img1, flow,warping_batch_size = 1):
+    def flow_warping(self,img0, img1, flow, is_cropped =False, warping_batch_size = 1):
+        self.mode = 'warping'
 
-        # if img0 == None:
-        #     self.is_warpingLoss = False
-        self.args.warping_batch_size = warping_batch_size
-        self.args.is_cropped = False
+        self.args.inference_batch_size = warping_batch_size
+        self.args.is_cropped = is_cropped
 
-        data = self.warping_dataloader( img0, img1, flow)
-        self.warping_inference(data, self.warping_model, offset=1)
-
+        data = self.flow_dataloader( img0, img1,flow)
+        self.inference(data, self.warping_model, offset=1)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    def flow_dataloader(self, img0, img1):
-        dataset = FlowEstimateDataset(self.args, img0, img1)
+    def flow_dataloader(self, img0, img1=0, flow=0):
+        dataset = FlowDataset(self.args, img0, img1,flow, mode=self.mode)
         inference_dataloader = DataLoader(dataset, batch_size=self.args.inference_batch_size, shuffle=False, **self.gpuargs)
-
         return inference_dataloader
 
 
-
-    def inference(self, data_loader, model, offset=0):
+    def inference(self, data_loader, model,  offset=0,):
         model.eval()
 
-        if self.args.save_flow :
-            flow_folder = self.args.inference_dir
-            if not os.path.exists(flow_folder):
-                os.makedirs(flow_folder)
+        if self.mode == 'flow_estimation':
+            if (self.args.save_flow):
+                flow_folder = self.args.inference_dir
+                if not os.path.exists(flow_folder):
+                    os.makedirs(flow_folder)
 
         self.args.inference_n_batches = np.inf if self.args.inference_n_batches < 0 else self.args.inference_n_batches
 
@@ -115,78 +85,37 @@ class FlowNet2API(object):
                 data, target = [d.cuda(async=True) for d in data], [t.cuda(async=True) for t in target]
             data, target = [Variable(d, volatile=True) for d in data], [Variable(t, volatile=True) for t in target]
 
-            losses, output = model(data[0], target[0], inference=True)
+            if self.mode == 'flow_estimation':
+                losses, output = model(data[0], target[0], inference=True)
 
-            if self.args.save_flow:
+                if self.args.save_flow:
+                    for i in range(self.args.inference_batch_size):
+                        _pflow = output[i].data.cpu().numpy().transpose(1, 2, 0)
+                        flow_utils.writeFlow(join(flow_folder, '%06d.flo' % (batch_idx * self.args.inference_batch_size + i)),
+                                             _pflow)
+
+                        if self.flow_visualize:
+                            flowX = _pflow[:, :, 0]
+                            plt.imshow(flowX)
+                            plt.savefig(fname= join(flow_folder, '%06d_x.png' % (batch_idx * self.args.inference_batch_size + i)))
+
+                            flowY = _pflow[:, :, 1]
+                            plt.imshow(flowY)
+                            plt.savefig(
+                                fname=join(flow_folder, '%06d_y.png' % (batch_idx * self.args.inference_batch_size + i)))
+
+            elif self.mode == 'warping':
+                warped_data, losses = model(data[0], target[0])
+
                 for i in range(self.args.inference_batch_size):
-                    _pflow = output[i].data.cpu().numpy().transpose(1, 2, 0)
-                    flow_utils.writeFlow(join(flow_folder, '%06d.flo' % (batch_idx * self.args.inference_batch_size + i)),
-                                         _pflow)
-
-                    if self.flow_visualize:
-                        flowX = _pflow[:, :, 0]
-                        plt.imshow(flowX)
-                        plt.savefig(fname= join(flow_folder, '%06d_x.png' % (batch_idx * self.args.inference_batch_size + i)))
-
-                        flowY = _pflow[:, :, 1]
-                        plt.imshow(flowY)
-                        plt.savefig(
-                            fname=join(flow_folder, '%06d_y.png' % (batch_idx * self.args.inference_batch_size + i)))
-
-
-            progress.update(1)
-
-        progress.close()
-
-
-        return
-
-
-
-    def warping_dataloader(self, img0, img1, flow):
-        dataset = WarpingDataset(self.args, img0, img1, flow)
-        warping_dataloader = DataLoader(dataset, batch_size=self.args.warping_batch_size, shuffle=False,
-                                          **self.gpuargs)
-        return warping_dataloader
-
-    def warping_inference(self, data_loader, model, offset=1):
-        model.eval()
-
-        self.args.warping_n_batches = np.inf if self.args.warping_n_batches < 0 else self.args.warping_n_batches
-
-        progress = tqdm(data_loader, ncols=100, total=np.minimum(len(data_loader), self.args.warping_n_batches),
-                        desc='Warping ',
-                        leave=True, position=offset)
-
-        statistics = []
-        total_loss = 0
-        for batch_idx, (data, target) in enumerate(progress):
-            if self.args.cuda:
-                data, target = [d.cuda(async=True) for d in data], [t.cuda(async=True) for t in target]
-            data, target = [Variable(d, volatile=True) for d in data], [Variable(t, volatile=True) for t in target]
-
-            warped_data, losses = model(data[0], target[0])
-            # losses = torch.norm(losses, p=2, dim=1).mean()
-            #
-            # total_loss += losses.data[0]
-            # loss_values = [v.data[0] for v in losses]
-            #
-            # statistics.append(loss_values)
-            for i in range(self.args.warping_batch_size):
-                warped_data = warped_data[i].data.cpu().numpy().transpose(1, 2, 0)
-                #misc.imshow(warped_data)
-                misc.imsave('warped_image'+str(batch_idx)+'.png', warped_data)
-
+                    warped_data = warped_data[i].data.cpu().numpy().transpose(1, 2, 0)
+                    misc.imsave('warped_image' + str(batch_idx) + '.png', warped_data)
 
             progress.update(1)
 
         progress.close()
 
         return
-
-
-
-
 
 
     def get_config(self):
@@ -286,16 +215,40 @@ class FlowNet2API(object):
         print("Warping Model initialized")
 
 
+class FlowWarping(nn.Module):
 
-class FlowEstimateDataset(data.Dataset):
-    def __init__(self, args, img0, img1):
+    def __init__(self):
+        super(FlowWarping, self).__init__()
+
+        self.channelnorm = ChannelNorm()
+        self.resample1 = Resample2d()
+
+
+    def forward(self, input, target):
+
+        img1 = input[:,:,0,:,:]
+        img0 = input[:,:,1,:,:]
+        flow = target
+
+        frame_size = img0.shape
+
+
+        resampled_img1 = self.resample1(img1, flow)
+        diff_img0 = img0 - resampled_img1
+        norm_diff_img0 = self.channelnorm(diff_img0) / (frame_size[1] * frame_size[2])
+
+        return resampled_img1, norm_diff_img0
+
+
+class FlowDataset(data.Dataset):
+    def __init__(self, args, img0, img1=0, flow=0, mode='flow_estimation'):
         self.args = args
         self.is_cropped = self.args.is_cropped
         self.crop_size = self.args.crop_size
         self.render_size = self.args.inference_size
 
-        for i in range(len(img0)):
-            assert (img0[i].shape == img1[i].shape), "a pair of images should have same shape"
+        self.mode = mode
+
 
         self.image_list = []
         self.flow_list = []
@@ -304,10 +257,16 @@ class FlowEstimateDataset(data.Dataset):
 
 
         for i in range(len(img0)):
+            if self.mode == 'flow_estimation':
+                self.flow_size = img0[i][:, :, 0:2].shape
+                flow_ = np.zeros(self.flow_size, dtype=float)
+            elif self.mode == 'warping':
+                self.img_size = img0[i].shape
+                img1[i] = np.zeros(self.img_size, dtype=float)
+                flow_ = flow[i]
+
             self.image_list += [[img0[i], img1[i]]]
-            self.flow_size = img0[i][:, :, 0:2].shape
-            flow = np.zeros(self.flow_size, dtype=float)
-            self.flow_list += [flow]
+            self.flow_list += [flow_]
 
         self.size = len(self.image_list)
 
@@ -329,6 +288,7 @@ class FlowEstimateDataset(data.Dataset):
 
         flow = self.flow_list[index]
 
+
         images = [img1, img2]
         image_size = img1.shape[:2]
         if self.is_cropped:
@@ -336,7 +296,8 @@ class FlowEstimateDataset(data.Dataset):
         else:
             cropper = StaticCenterCrop(image_size, self.render_size)
         images = map(cropper, images)
-        flow = cropper(flow)
+        if self.mode == 'flow_estimation':
+            flow = cropper(flow)
 
         images = np.array(images).transpose(3, 0, 1, 2)
         flow = flow.transpose(2, 0, 1)
@@ -348,91 +309,3 @@ class FlowEstimateDataset(data.Dataset):
 
     def __len__(self):
         return self.size
-
-
-class WarpingDataset(data.Dataset):
-    def __init__(self, args, img0, img1, flow):
-        self.args = args
-        self.is_cropped = self.args.is_cropped
-        self.crop_size = self.args.crop_size
-        self.render_size = self.args.inference_size
-
-        # for i in range(len(img1)):
-        #     assert (img1[i][:,:,0].shape == flow[i][:,:,0].shape), " image and flow should have same shape"
-
-        self.warp_list = []
-        self.target_list = []
-
-        self.frame_size = img1[0].shape
-
-
-        for i in range(len(img1)):
-            self.warp_list += [[img1[i], flow[i]]]
-            self.target_list += [img0[i]]
-
-        self.size = len(self.warp_list)
-
-        if (self.render_size[0] < 0) or (self.render_size[1] < 0) or (self.frame_size[0] % 64) or (
-                self.frame_size[1] % 64):
-            self.render_size[0] = ((self.frame_size[0]) / 64) * 64
-            self.render_size[1] = ((self.frame_size[1]) / 64) * 64
-
-        args.inference_size = self.render_size
-
-        assert (len(self.warp_list) == len(self.target_list))
-
-
-    def __getitem__(self, index):
-        index = index % self.size
-
-        img1 = self.warp_list[index][0]
-        flow = self.warp_list[index][1]
-
-        img0 = self.target_list[index]
-
-        images = [img0, img1]
-
-        image_size = img1.shape[:2]
-        if self.is_cropped:
-            cropper = StaticRandomCrop(image_size, self.crop_size)
-        else:
-            cropper = StaticCenterCrop(image_size, self.render_size)
-        images = map(cropper, images)
-
-        images = np.array(images).transpose(3, 0, 1, 2)
-        flow = flow.transpose(2, 0, 1)
-
-        images = torch.from_numpy(images.astype(np.float32))
-        flow = torch.from_numpy(flow.astype(np.float32))
-
-        return [images], [flow]
-
-
-    def __len__(self):
-        return self.size
-
-
-
-class FlowWarping(nn.Module):
-
-    def __init__(self):
-        super(FlowWarping, self).__init__()
-
-        self.channelnorm = ChannelNorm()
-        self.resample1 = Resample2d()
-
-
-    def forward(self, input, target):
-
-        img0 = input[:,:,0,:,:]
-        img1 = input[:,:,1,:,:]
-        flow = target
-
-        frame_size = img0.shape
-
-
-        resampled_img1 = self.resample1(img1, flow)
-        diff_img0 = img0 - resampled_img1
-        norm_diff_img0 = self.channelnorm(diff_img0) / (frame_size[1] * frame_size[2])
-
-        return resampled_img1, norm_diff_img0
